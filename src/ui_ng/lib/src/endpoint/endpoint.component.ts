@@ -11,44 +11,52 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-import { Component, OnInit, ViewChild, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
-import { Endpoint, ReplicationRule } from '../service/interface';
-import { EndpointService } from '../service/endpoint.service';
+import {
+    Component,
+    OnInit,
+    OnDestroy,
+    ViewChild,
+    ChangeDetectionStrategy,
+    ChangeDetectorRef
+} from "@angular/core";
+import { Subscription } from "rxjs/Subscription";
+import { Observable } from "rxjs/Observable";
+import "rxjs/add/observable/forkJoin";
+import { TranslateService } from "@ngx-translate/core";
+import { Comparator } from "clarity-angular";
 
-import { TranslateService } from '@ngx-translate/core';
+import { Endpoint } from "../service/interface";
+import { EndpointService } from "../service/endpoint.service";
 
-import { ErrorHandler } from '../error-handler/index';
+import { ErrorHandler } from "../error-handler/index";
 
-import { ConfirmationMessage } from '../confirmation-dialog/confirmation-message';
-import { ConfirmationAcknowledgement } from '../confirmation-dialog/confirmation-state-message';
-import { ConfirmationDialogComponent } from '../confirmation-dialog/confirmation-dialog.component';
+import {ConfirmationMessage} from "../confirmation-dialog/confirmation-message";
+import {ConfirmationAcknowledgement} from "../confirmation-dialog/confirmation-state-message";
+import {ConfirmationDialogComponent} from "../confirmation-dialog/confirmation-dialog.component";
 
-import { ConfirmationTargets, ConfirmationState, ConfirmationButtons } from '../shared/shared.const';
+import {
+    ConfirmationTargets,
+    ConfirmationState,
+    ConfirmationButtons
+} from "../shared/shared.const";
 
-import { Subscription } from 'rxjs/Subscription';
+import { CreateEditEndpointComponent } from "../create-edit-endpoint/create-edit-endpoint.component";
+import { toPromise, CustomComparator } from "../utils";
 
-import { CreateEditEndpointComponent } from '../create-edit-endpoint/create-edit-endpoint.component';
-
-import { ENDPOINT_STYLE } from './endpoint.component.css';
-import { ENDPOINT_TEMPLATE } from './endpoint.component.html';
-
-import { toPromise, CustomComparator } from '../utils';
-
-import { State, Comparator } from 'clarity-angular';
+import {operateChanges, OperateInfo, OperationState} from "../operation/operate";
+import {OperationService} from "../operation/operation.service";
 
 @Component({
-    selector: 'hbr-endpoint',
-    template: ENDPOINT_TEMPLATE,
-    styles: [ENDPOINT_STYLE],
+    selector: "hbr-endpoint",
+    templateUrl: "./endpoint.component.html",
+    styleUrls: ["./endpoint.component.scss"],
     changeDetection: ChangeDetectionStrategy.OnPush
 })
-export class EndpointComponent implements OnInit {
-
+export class EndpointComponent implements OnInit, OnDestroy {
     @ViewChild(CreateEditEndpointComponent)
     createEditEndpointComponent: CreateEditEndpointComponent;
 
-
-    @ViewChild('confirmationDialog')
+    @ViewChild("confirmationDialog")
     confirmationDialogComponent: ConfirmationDialogComponent;
 
     targets: Endpoint[];
@@ -59,9 +67,13 @@ export class EndpointComponent implements OnInit {
 
     loading: boolean = false;
 
-    creationTimeComparator: Comparator<Endpoint> = new CustomComparator<Endpoint>('creation_time', 'date');
+    creationTimeComparator: Comparator<Endpoint> = new CustomComparator<Endpoint>(
+        "creation_time",
+        "date"
+    );
 
     timerHandler: any;
+    selectedRow: Endpoint[] = [];
 
     get initEndpoint(): Endpoint {
         return {
@@ -74,41 +86,16 @@ export class EndpointComponent implements OnInit {
         };
     }
 
-    constructor(
-        private endpointService: EndpointService,
-        private errorHandler: ErrorHandler,
-        private translateService: TranslateService,
-        private ref: ChangeDetectorRef) {
+    constructor(private endpointService: EndpointService,
+                private errorHandler: ErrorHandler,
+                private translateService: TranslateService,
+                private operationService: OperationService,
+                private ref: ChangeDetectorRef) {
         this.forceRefreshView(1000);
     }
 
-    confirmDeletion(message: ConfirmationAcknowledgement) {
-        if (message &&
-            message.source === ConfirmationTargets.TARGET &&
-            message.state === ConfirmationState.CONFIRMED) {
-
-            let targetId = message.data;
-            toPromise<number>(this.endpointService
-                .deleteEndpoint(targetId))
-                .then(
-                response => {
-                    this.translateService.get('DESTINATION.DELETED_SUCCESS')
-                        .subscribe(res => this.errorHandler.info(res));
-                    this.reload(true);
-                }).catch(
-                error => {
-                    if (error && error.status === 412) {
-                        this.translateService.get('DESTINATION.FAILED_TO_DELETE_TARGET_IN_USED')
-                            .subscribe(res => this.errorHandler.error(res));
-                    } else {
-                        this.errorHandler.error(error);
-                    }
-                });
-        }
-    }
-
     ngOnInit(): void {
-        this.targetName = '';
+        this.targetName = "";
         this.retrieve();
     }
 
@@ -118,16 +105,20 @@ export class EndpointComponent implements OnInit {
         }
     }
 
+    selectedChange(): void {
+        this.forceRefreshView(5000);
+    }
+
     retrieve(): void {
         this.loading = true;
-        toPromise<Endpoint[]>(this.endpointService
-            .getEndpoints(this.targetName))
-            .then(
-            targets => {
+        this.selectedRow = [];
+        toPromise<Endpoint[]>(this.endpointService.getEndpoints(this.targetName))
+            .then(targets => {
                 this.targets = targets || [];
                 this.forceRefreshView(1000);
                 this.loading = false;
-            }).catch(error => {
+            })
+            .catch(error => {
                 this.errorHandler.error(error);
                 this.loading = false;
             });
@@ -143,7 +134,7 @@ export class EndpointComponent implements OnInit {
     }
 
     reload($event: any) {
-        this.targetName = '';
+        this.targetName = "";
         this.retrieve();
     }
 
@@ -152,44 +143,89 @@ export class EndpointComponent implements OnInit {
         this.target = this.initEndpoint;
     }
 
-    editTarget(target: Endpoint) {
-        if (target) {
+    editTargets(targets: Endpoint[]) {
+        if (targets && targets.length === 1) {
+            let target = targets[0];
             let editable = true;
             if (!target.id) {
                 return;
             }
             let id: number | string = target.id;
-            toPromise<ReplicationRule[]>(this.endpointService
-                .getEndpointWithReplicationRules(id))
-                .then(
-                rules => {
-                    if (rules && rules.length > 0) {
-                        rules.forEach((rule) => editable = (rule && rule.enabled !== 1));
-                    }
-                    this.createEditEndpointComponent.openCreateEditTarget(editable, id);
-                    this.forceRefreshView(1000);
-                })
-                .catch(error => this.errorHandler.error(error));
+            this.createEditEndpointComponent.openCreateEditTarget(editable, id);
         }
     }
 
-    deleteTarget(target: Endpoint) {
-        if (target) {
-            let targetId = target.id;
+    deleteTargets(targets: Endpoint[]) {
+        if (targets && targets.length) {
+            let targetNames: string[] = [];
+            targets.forEach(target => {
+                targetNames.push(target.name);
+            });
             let deletionMessage = new ConfirmationMessage(
                 'REPLICATION.DELETION_TITLE_TARGET',
                 'REPLICATION.DELETION_SUMMARY_TARGET',
-                target.name || '',
-                target.id,
+                targetNames.join(', ') || '',
+                targets,
                 ConfirmationTargets.TARGET,
                 ConfirmationButtons.DELETE_CANCEL);
             this.confirmationDialogComponent.open(deletionMessage);
         }
     }
 
-    //Forcely refresh the view
+    confirmDeletion(message: ConfirmationAcknowledgement) {
+        if (message &&
+            message.source === ConfirmationTargets.TARGET &&
+            message.state === ConfirmationState.CONFIRMED) {
+            let targetLists: Endpoint[] = message.data;
+            if (targetLists && targetLists.length) {
+                let promiseLists: any[] = [];
+                targetLists.forEach(target => {
+                    promiseLists.push(this.delOperate(target));
+                });
+                Promise.all(promiseLists).then((item) => {
+                    this.selectedRow = [];
+                    this.reload(true);
+                    this.forceRefreshView(2000);
+                });
+            }
+        }
+    }
+
+    delOperate(target: Endpoint) {
+        // init operation info
+        let operMessage = new OperateInfo();
+        operMessage.name = 'OPERATION.DELETE_REGISTRY';
+        operMessage.data.id = target.id;
+        operMessage.state = OperationState.progressing;
+        operMessage.data.name = target.name;
+        this.operationService.publishInfo(operMessage);
+
+        return toPromise<number>(this.endpointService
+            .deleteEndpoint(target.id))
+            .then(
+                response => {
+                    this.translateService.get('BATCH.DELETED_SUCCESS')
+                        .subscribe(res => {
+                            operateChanges(operMessage, OperationState.success);
+                        });
+                }).catch(
+                error => {
+                    if (error && error.status === 412) {
+                        Observable.forkJoin(this.translateService.get('BATCH.DELETED_FAILURE'),
+                            this.translateService.get('DESTINATION.FAILED_TO_DELETE_TARGET_IN_USED')).subscribe(res => {
+                            operateChanges(operMessage, OperationState.failure, res[1]);
+                        });
+                    } else {
+                        this.translateService.get('BATCH.DELETED_FAILURE').subscribe(res => {
+                            operateChanges(operMessage, OperationState.failure, res);
+                        });
+                    }
+                });
+    }
+
+    // Forcely refresh the view
     forceRefreshView(duration: number): void {
-        //Reset timer
+        // Reset timer
         if (this.timerHandler) {
             clearInterval(this.timerHandler);
         }

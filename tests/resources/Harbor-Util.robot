@@ -19,8 +19,8 @@ Library  OperatingSystem
 
 *** Variables ***
 ${HARBOR_VERSION}  v1.1.1
-${CLAIR_BUILDER}  1.2.7
-
+${CLAIR_BUILDER}  1.4.1
+${GOLANG_VERSION}  1.9.2
 
 *** Keywords ***
 Install Harbor to Test Server
@@ -51,17 +51,27 @@ Down Harbor
     [Arguments]  ${with_notary}=true  ${with_clair}=true
     ${rc}  ${output}=  Run And Return Rc And Output  echo "Y" | make down -e NOTARYFLAG=${with_notary} CLAIRFLAG=${with_clair}
     Log  ${rc}
+    Log  ${output}
     Should Be Equal As Integers  ${rc}  0
 
 Package Harbor Offline
-    [Arguments]  ${golang_image}=golang:1.7.3  ${clarity_image}=vmware/harbor-clarity-ui-builder:${CLAIR_BUILDER}  ${with_notary}=true  ${with_clair}=true  ${with_migrator}=true
+    [Arguments]  ${golang_image}=golang:${GOLANG_VERSION}  ${clarity_image}=vmware/harbor-clarity-ui-builder:${CLAIR_BUILDER}  ${with_notary}=true  ${with_clair}=true  ${with_migrator}=true
     Log To Console  \nStart Docker Daemon
     Start Docker Daemon Locally
-    ${rc}  ${output}=  Run And Return Rc And Output  make package_offline DEVFLAG=false GOBUILDIMAGE=${golang_image} COMPILETAG=compile_golangimage CLARITYIMAGE=${clarity_image} NOTARYFLAG=${with_notary} CLAIRFLAG=${with_clair} MIGRATORFLAG=${with_migrator} HTTPPROXY=
+    ${rc}  ${output}=  Run And Return Rc And Output  make package_offline VERSIONTAG=%{Harbor_Assets_Version} PKGVERSIONTAG=%{Harbor_Package_Version} UIVERSIONTAG=%{Harbor_UI_Version} GOBUILDIMAGE=${golang_image} COMPILETAG=compile_golangimage CLARITYIMAGE=${clarity_image} NOTARYFLAG=${with_notary} CLAIRFLAG=${with_clair} MIGRATORFLAG=${with_migrator} HTTPPROXY=
     Log  ${rc}
     Log  ${output}
     Should Be Equal As Integers  ${rc}  0
 
+Package Harbor Online
+    [Arguments]  ${golang_image}=golang:${GOLANG_VERSION}  ${clarity_image}=vmware/harbor-clarity-ui-builder:${CLAIR_BUILDER}  ${with_notary}=true  ${with_clair}=true  ${with_migrator}=true
+    Log To Console  \nStart Docker Daemon
+    Start Docker Daemon Locally
+    ${rc}  ${output}=  Run And Return Rc And Output  make package_online VERSIONTAG=%{Harbor_Assets_Version} PKGVERSIONTAG=%{Harbor_Package_Version} UIVERSIONTAG=%{Harbor_UI_Version} GOBUILDIMAGE=${golang_image} COMPILETAG=compile_golangimage CLARITYIMAGE=${clarity_image} NOTARYFLAG=${with_notary} CLAIRFLAG=${with_clair} MIGRATORFLAG=${with_migrator} HTTPPROXY=
+    Log  ${rc}
+    Log  ${output}
+    Should Be Equal As Integers  ${rc}  0
+    
 Switch To LDAP
     Down Harbor
     ${rc}  ${output}=  Run And Return Rc And Output  rm -rf /data
@@ -83,7 +93,7 @@ Switch To LDAP
     Should Be Equal As Integers  ${rc}  0	
     Generate Certificate Authority For Chrome
 	
-Enabe Notary Client
+Enable Notary Client
     ${rc}  ${output}=  Run And Return Rc And Output  rm -rf ~/.docker/
     Log  ${rc}
     Should Be Equal As Integers  ${rc}  0
@@ -138,7 +148,7 @@ Prepare Cert
     Should Be Equal As Integers  ${rc}  0
 
 Compile and Up Harbor With Source Code
-    [Arguments]  ${golang_image}=golang:1.7.3  ${clarity_image}=vmware/harbor-clarity-ui-builder:${CLAIR_BUILDER}  ${with_notary}=true  ${with_clair}=true
+    [Arguments]  ${golang_image}=golang:${GOLANG_VERSION}  ${clarity_image}=vmware/harbor-clarity-ui-builder:${CLAIR_BUILDER}  ${with_notary}=true  ${with_clair}=true
     ${rc}  ${output}=  Run And Return Rc And Output  docker pull ${clarity_image}
     Log  ${output}
     Should Be Equal As Integers  ${rc}  0
@@ -162,3 +172,7 @@ Wait for Harbor Ready
     \  Return From Keyword If  ${status}  ${HARBOR_IP}
     \  Sleep  30s
     Fail Harbor failed to come up properly!
+
+Get Harbor Version
+    ${rc}  ${output}=  Run And Return Rc And Output  curl -k -X GET --header 'Accept: application/json' 'https://${ip}/api/systeminfo'|grep -i harbor_version
+    Log To Console  ${output}

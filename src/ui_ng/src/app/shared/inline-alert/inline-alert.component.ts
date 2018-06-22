@@ -11,17 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-import { Component, Input, Output, EventEmitter } from '@angular/core';
+import { Component, Output, EventEmitter } from '@angular/core';
 import { TranslateService } from '@ngx-translate/core';
 
 import { errorHandler } from '../shared.utils';
-import { Observable } from 'rxjs/Rx';
 import { Subscription } from "rxjs";
 
 @Component({
     selector: 'inline-alert',
     templateUrl: "inline-alert.component.html",
-    styleUrls: ['inline-alert.component.css']
+    styleUrls: ['inline-alert.component.scss']
 })
 export class InlineAlertComponent {
     inlineAlertType: string = 'alert-danger';
@@ -35,6 +34,7 @@ export class InlineAlertComponent {
     blinking: boolean = false;
 
     @Output() confirmEvt = new EventEmitter<boolean>();
+    @Output() closeEvt = new EventEmitter<boolean>();
 
     constructor(private translate: TranslateService) { }
 
@@ -42,7 +42,7 @@ export class InlineAlertComponent {
         return this.displayedText;
     }
 
-    //Show error message inline
+    // Show error message inline
     public showInlineError(error: any): void {
         this.displayedText = errorHandler(error);
         if (this.displayedText) {
@@ -56,7 +56,7 @@ export class InlineAlertComponent {
         this.useAppLevelStyle = false;
     }
 
-    //Show confirmation info with action button
+    // Show confirmation info with action button
     public showInlineConfirmation(warning: any): void {
         this.displayedText = "";
         if (warning && warning.message) {
@@ -69,7 +69,20 @@ export class InlineAlertComponent {
         this.useAppLevelStyle = false;
     }
 
-    //Show inline sccess info
+    // Show warning
+    public showInlineWarning(warning: any): void {
+        this.displayedText = "";
+        if (warning && warning.message) {
+            this.translate.get(warning.message).subscribe((res: string) => this.displayedText = res);
+        }
+        this.inlineAlertType = 'alert-warning';
+        this.showCancelAction = false;
+        this.inlineAlertClosable = true;
+        this.alertClose = false;
+        this.useAppLevelStyle = false;
+    }
+
+    // Show inline sccess info
     public showInlineSuccess(info: any): void {
         this.displayedText = "";
         if (info && info.message) {
@@ -82,9 +95,10 @@ export class InlineAlertComponent {
         this.useAppLevelStyle = false;
     }
 
-    //Close alert
+    // Close alert
     public close(): void {
         this.alertClose = true;
+        this.closeEvt.emit(true);
     }
 
     public blink() {

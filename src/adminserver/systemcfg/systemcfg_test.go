@@ -62,6 +62,9 @@ func TestParseStringToBool(t *testing.T) {
 func TestInitCfgStore(t *testing.T) {
 	os.Clearenv()
 	path := "/tmp/config.json"
+	if err := os.Setenv("CFG_DRIVER", "json"); err != nil {
+		t.Fatalf("failed to set env: %v", err)
+	}
 	if err := os.Setenv("JSON_CFG_STORE_PATH", path); err != nil {
 		t.Fatalf("failed to set env: %v", err)
 	}
@@ -121,4 +124,61 @@ func TestLoadFromEnv(t *testing.T) {
 	assert.Equal(t, extEndpoint, cfgs[common.ExtEndpoint])
 	assert.Equal(t, "ldap_url", cfgs[common.LDAPURL])
 	assert.Equal(t, true, cfgs[common.LDAPVerifyCert])
+}
+
+func TestGetDatabaseFromCfg(t *testing.T) {
+	cfg := map[string]interface{}{
+		common.DatabaseType:       "postgresql",
+		common.PostGreSQLDatabase: "registry",
+		common.PostGreSQLHOST:     "127.0.0.1",
+		common.PostGreSQLPort:     5432,
+		common.PostGreSQLPassword: "root123",
+		common.PostGreSQLUsername: "postgres",
+	}
+
+	database := GetDatabaseFromCfg(cfg)
+
+	assert.Equal(t, "postgresql", database.Type)
+}
+
+func TestValidLdapScope(t *testing.T) {
+	var dbValue float64
+	dbValue = 2
+	ldapScopeKey := "ldap_scope"
+	testCfgs := []struct {
+		config          map[string]interface{}
+		migrate         bool
+		ldapScopeResult int
+	}{
+		{map[string]interface{}{
+			ldapScopeKey: 1,
+		}, true, 0},
+		{map[string]interface{}{
+			ldapScopeKey: 2,
+		}, true, 1},
+		{map[string]interface{}{
+			ldapScopeKey: 3,
+		}, true, 2},
+		{map[string]interface{}{
+			ldapScopeKey: -1,
+		}, true, 0},
+		{map[string]interface{}{
+			ldapScopeKey: 100,
+		}, false, 2},
+		{map[string]interface{}{
+			ldapScopeKey: -100,
+		}, false, 0},
+		{map[string]interface{}{
+			ldapScopeKey: dbValue,
+		}, false, 2},
+	}
+
+	for i, item := range testCfgs {
+		validLdapScope(item.config, item.migrate)
+		if item.config[ldapScopeKey].(int) != item.ldapScopeResult {
+			t.Fatalf("Failed to update ldapScope expected %v, actual %v at index %v", item.ldapScopeResult, item.config[ldapScopeKey], i)
+		}
+
+	}
+
 }

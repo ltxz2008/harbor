@@ -20,8 +20,9 @@ import (
 	"time"
 
 	"github.com/astaxie/beego/orm"
-	//"github.com/vmware/harbor/src/common/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/vmware/harbor/src/common"
 	"github.com/vmware/harbor/src/common/models"
 	"github.com/vmware/harbor/src/common/utils"
 	"github.com/vmware/harbor/src/common/utils/log"
@@ -40,7 +41,7 @@ func execUpdate(o orm.Ormer, sql string, params ...interface{}) error {
 	return nil
 }
 
-func clearUp(username string) {
+func cleanByUser(username string) {
 	var err error
 
 	o := GetOrmer()
@@ -48,9 +49,9 @@ func clearUp(username string) {
 
 	err = execUpdate(o, `delete 
 		from project_member 
-		where user_id = (
+		where entity_id = (
 			select user_id
-			from user
+			from harbor_user
 			where username = ?
 		) `, username)
 	if err != nil {
@@ -97,7 +98,7 @@ func clearUp(username string) {
 		log.Error(err)
 	}
 
-	err = execUpdate(o, `delete from user where username = ?`, username)
+	err = execUpdate(o, `delete from harbor_user where username = ?`, username)
 	if err != nil {
 		o.Rollback()
 		log.Error(err)
@@ -133,16 +134,13 @@ const publicityOn = 1
 const publicityOff = 0
 
 func TestMain(m *testing.M) {
-	databases := []string{"mysql", "sqlite"}
+	databases := []string{"postgresql"}
 	for _, database := range databases {
 		log.Infof("run test cases for database: %s", database)
-
 		result := 1
 		switch database {
-		case "mysql":
-			PrepareTestForMySQL()
-		case "sqlite":
-			PrepareTestForSQLite()
+		case "postgresql":
+			PrepareTestForPostgresSQL()
 		default:
 			log.Fatalf("invalid database: %s", database)
 		}
@@ -155,9 +153,23 @@ func TestMain(m *testing.M) {
 }
 
 func testForAll(m *testing.M) int {
-	clearUp(username)
+	cleanByUser(username)
 
-	return m.Run()
+	rc := m.Run()
+	clearAll()
+	return rc
+}
+
+func clearAll() {
+	tables := []string{"project_member",
+		"project_metadata", "access_log", "repository", "replication_policy",
+		"replication_target", "replication_job", "replication_immediate_trigger", "img_scan_job",
+		"img_scan_overview", "clair_vuln_timestamp", "project", "harbor_user"}
+	for _, t := range tables {
+		if err := ClearTable(t); err != nil {
+			log.Errorf("Failed to clear table: %s,error: %v", t, err)
+		}
+	}
 }
 
 func TestRegister(t *testing.T) {
@@ -189,41 +201,6 @@ func TestRegister(t *testing.T) {
 	}
 	if newUser.Email != "tester01@vmware.com" {
 		t.Errorf("Email does not match, expected: %s, actual: %s", "tester01@vmware.com", newUser.Email)
-	}
-}
-
-func TestCheckUserPassword(t *testing.T) {
-	nonExistUser := models.User{
-		Username: "non-exist",
-	}
-	correctUser := models.User{
-		Username: username,
-		Password: password,
-	}
-	wrongPwd := models.User{
-		Username: username,
-		Password: "wrong",
-	}
-	u, err := CheckUserPassword(nonExistUser)
-	if err != nil {
-		t.Errorf("Failed in CheckUserPassword: %v", err)
-	}
-	if u != nil {
-		t.Errorf("Expected nil for Non exist user, but actual: %+v", u)
-	}
-	u, err = CheckUserPassword(wrongPwd)
-	if err != nil {
-		t.Errorf("Failed in CheckUserPassword: %v", err)
-	}
-	if u != nil {
-		t.Errorf("Expected nil for user with wrong password, but actual: %+v", u)
-	}
-	u, err = CheckUserPassword(correctUser)
-	if err != nil {
-		t.Errorf("Failed in CheckUserPassword: %v", err)
-	}
-	if u == nil {
-		t.Errorf("User should not be nil for correct user")
 	}
 }
 
@@ -305,6 +282,7 @@ var currentUser *models.User
 func TestGetUser(t *testing.T) {
 	queryUser := models.User{
 		Username: username,
+		Email:    "tester01@vmware.com",
 	}
 	var err error
 	currentUser, err = GetUser(queryUser)
@@ -384,42 +362,6 @@ func TestChangeUserPassword(t *testing.T) {
 		t.Errorf("The username returned by Login does not match, expected: %s, acutal: %s", username, loginedUser.Username)
 	}
 }
-
-func TestChangeUserPasswordWithOldPassword(t *testing.T) {
-	user := models.User{UserID: currentUser.UserID}
-	query, err := GetUser(user)
-	if err != nil {
-		t.Errorf("Error occurred when get user salt")
-	}
-	currentUser.Salt = query.Salt
-
-	err = ChangeUserPassword(models.User{UserID: currentUser.UserID, Password: "NewerHarborTester12345", Salt: currentUser.Salt}, "NewHarborTester12345")
-	if err != nil {
-		t.Errorf("Error occurred in ChangeUserPassword: %v", err)
-	}
-	loginedUser, err := LoginByDb(models.AuthModel{Principal: currentUser.Username, Password: "NewerHarborTester12345"})
-	if err != nil {
-		t.Errorf("Error occurred in LoginByDb: %v", err)
-	}
-	if loginedUser.Username != username {
-		t.Errorf("The username returned by Login does not match, expected: %s, acutal: %s", username, loginedUser.Username)
-	}
-}
-
-func TestChangeUserPasswordWithIncorrectOldPassword(t *testing.T) {
-	err := ChangeUserPassword(models.User{UserID: currentUser.UserID, Password: "NNewerHarborTester12345", Salt: currentUser.Salt}, "WrongNewerHarborTester12345")
-	if err == nil {
-		t.Errorf("Error does not occurred due to old password is incorrect.")
-	}
-	loginedUser, err := LoginByDb(models.AuthModel{Principal: currentUser.Username, Password: "NNewerHarborTester12345"})
-	if err != nil {
-		t.Errorf("Error occurred in LoginByDb: %v", err)
-	}
-	if loginedUser != nil {
-		t.Errorf("The login user is not nil, acutal: %+v", loginedUser)
-	}
-}
-
 func TestAddProject(t *testing.T) {
 
 	project := models.Project{
@@ -619,33 +561,8 @@ func TestGetProjectById(t *testing.T) {
 	}
 }
 
-func TestGetUserByProject(t *testing.T) {
-	pid := currentProject.ProjectID
-	u1 := models.User{
-		Username: "Tester",
-	}
-	u2 := models.User{
-		Username: "nononono",
-	}
-	users, err := GetUserByProject(pid, u1)
-	if err != nil {
-		t.Errorf("Error happened in GetUserByProject: %v, project Id: %d, user: %+v", err, pid, u1)
-	}
-	if len(users) != 1 {
-		t.Errorf("unexpected length of user list, expected: 1, the users list: %+v", users)
-	}
-	users, err = GetUserByProject(pid, u2)
-	if err != nil {
-		t.Errorf("Error happened in GetUserByProject: %v, project Id: %d, user: %+v", err, pid, u2)
-	}
-	if len(users) != 0 {
-		t.Errorf("unexpected length of user list, expected: 0, the users list: %+v", users)
-	}
-
-}
-
 func TestGetUserProjectRoles(t *testing.T) {
-	r, err := GetUserProjectRoles(currentUser.UserID, currentProject.ProjectID)
+	r, err := GetUserProjectRoles(currentUser.UserID, currentProject.ProjectID, common.UserMember)
 	if err != nil {
 		t.Errorf("Error happened in GetUserProjectRole: %v, userID: %+v, project Id: %d", err, currentUser.UserID, currentProject.ProjectID)
 	}
@@ -674,68 +591,13 @@ func TestGetTotalOfProjects(t *testing.T) {
 func TestGetProjects(t *testing.T) {
 	projects, err := GetProjects(nil)
 	if err != nil {
-		t.Errorf("Error occurred in GetAllProjects: %v", err)
+		t.Errorf("Error occurred in GetProjects: %v", err)
 	}
 	if len(projects) != 2 {
 		t.Errorf("Expected length of projects is 2, but actual: %d, the projects: %+v", len(projects), projects)
 	}
 	if projects[1].Name != projectName {
 		t.Errorf("Expected project name in the list: %s, actual: %s", projectName, projects[1].Name)
-	}
-}
-
-func TestAddProjectMember(t *testing.T) {
-	err := AddProjectMember(currentProject.ProjectID, 1, models.DEVELOPER)
-	if err != nil {
-		t.Errorf("Error occurred in AddProjectMember: %v", err)
-	}
-
-	roles, err := GetUserProjectRoles(1, currentProject.ProjectID)
-	if err != nil {
-		t.Errorf("Error occurred in GetUserProjectRoles: %v", err)
-	}
-
-	flag := false
-	for _, role := range roles {
-		if role.Name == "developer" {
-			flag = true
-			break
-		}
-	}
-
-	if !flag {
-		t.Errorf("the user which ID is 1 does not have developer privileges")
-	}
-}
-
-func TestUpdateProjectMember(t *testing.T) {
-	err := UpdateProjectMember(currentProject.ProjectID, 1, models.GUEST)
-	if err != nil {
-		t.Errorf("Error occurred in UpdateProjectMember: %v", err)
-	}
-	roles, err := GetUserProjectRoles(1, currentProject.ProjectID)
-	if err != nil {
-		t.Errorf("Error occurred in GetUserProjectRoles: %v", err)
-	}
-	if roles[0].Name != "guest" {
-		t.Errorf("The user with ID 1 is not guest role after update, the acutal role: %s", roles[0].Name)
-	}
-
-}
-
-func TestDeleteProjectMember(t *testing.T) {
-	err := DeleteProjectMember(currentProject.ProjectID, 1)
-	if err != nil {
-		t.Errorf("Error occurred in DeleteProjectMember: %v", err)
-	}
-
-	roles, err := GetUserProjectRoles(1, currentProject.ProjectID)
-	if err != nil {
-		t.Errorf("Error occurred in GetUserProjectRoles: %v", err)
-	}
-
-	if len(roles) != 0 {
-		t.Errorf("delete record failed from table project_member")
 	}
 }
 
@@ -757,7 +619,7 @@ func TestGetRoleByID(t *testing.T) {
 }
 
 func TestToggleAdminRole(t *testing.T) {
-	err := ToggleUserAdminRole(currentUser.UserID, 1)
+	err := ToggleUserAdminRole(currentUser.UserID, true)
 	if err != nil {
 		t.Errorf("Error in toggle ToggleUserAdmin role: %v, user: %+v", err, currentUser)
 	}
@@ -768,7 +630,7 @@ func TestToggleAdminRole(t *testing.T) {
 	if !isAdmin {
 		t.Errorf("User is not admin after toggled, user id: %d", currentUser.UserID)
 	}
-	err = ToggleUserAdminRole(currentUser.UserID, 0)
+	err = ToggleUserAdminRole(currentUser.UserID, false)
 	if err != nil {
 		t.Errorf("Error in toggle ToggleUserAdmin role: %v, user: %+v", err, currentUser)
 	}
@@ -940,7 +802,6 @@ func TestFilterRepTargets(t *testing.T) {
 func TestAddRepPolicy(t *testing.T) {
 	policy := models.RepPolicy{
 		ProjectID:   1,
-		Enabled:     1,
 		TargetID:    targetID,
 		Description: "whatever",
 		Name:        "mypolicy",
@@ -960,15 +821,10 @@ func TestAddRepPolicy(t *testing.T) {
 		t.Errorf("Unable to find a policy with id: %d", id)
 	}
 
-	if p.Name != "mypolicy" || p.TargetID != targetID || p.Enabled != 1 || p.Description != "whatever" {
-		t.Errorf("The data does not match, expected: Name: mypolicy, TargetID: %d, Enabled: 1, Description: whatever;\n result: Name: %s, TargetID: %d, Enabled: %d, Description: %s",
-			targetID, p.Name, p.TargetID, p.Enabled, p.Description)
+	if p.Name != "mypolicy" || p.TargetID != targetID || p.Description != "whatever" {
+		t.Errorf("The data does not match, expected: Name: mypolicy, TargetID: %d, Description: whatever;\n result: Name: %s, TargetID: %d, Description: %s",
+			targetID, p.Name, p.TargetID, p.Description)
 	}
-	var tm = time.Now().AddDate(0, 0, -1)
-	if !p.StartTime.After(tm) {
-		t.Errorf("Unexpected start_time: %v", p.StartTime)
-	}
-
 }
 
 func TestGetRepPolicyByTarget(t *testing.T) {
@@ -1018,44 +874,9 @@ func TestGetRepPolicyByName(t *testing.T) {
 
 }
 
-func TestDisableRepPolicy(t *testing.T) {
-	err := DisableRepPolicy(policyID)
-	if err != nil {
-		t.Errorf("Failed to disable policy, id: %d", policyID)
-	}
-	p, err := GetRepPolicy(policyID)
-	if err != nil {
-		t.Errorf("Error occurred in GetPolicy: %v, id: %d", err, policyID)
-	}
-	if p == nil {
-		t.Errorf("Unable to find a policy with id: %d", policyID)
-	}
-	if p.Enabled == 1 {
-		t.Errorf("The Enabled value of replication policy is still 1 after disabled, id: %d", policyID)
-	}
-}
-
-func TestEnableRepPolicy(t *testing.T) {
-	err := EnableRepPolicy(policyID)
-	if err != nil {
-		t.Errorf("Failed to disable policy, id: %d", policyID)
-	}
-	p, err := GetRepPolicy(policyID)
-	if err != nil {
-		t.Errorf("Error occurred in GetPolicy: %v, id: %d", err, policyID)
-	}
-	if p == nil {
-		t.Errorf("Unable to find a policy with id: %d", policyID)
-	}
-	if p.Enabled == 0 {
-		t.Errorf("The Enabled value of replication policy is still 0 after disabled, id: %d", policyID)
-	}
-}
-
 func TestAddRepPolicy2(t *testing.T) {
 	policy2 := models.RepPolicy{
 		ProjectID:   3,
-		Enabled:     0,
 		TargetID:    3,
 		Description: "whatever",
 		Name:        "mypolicy",
@@ -1071,10 +892,6 @@ func TestAddRepPolicy2(t *testing.T) {
 	}
 	if p == nil {
 		t.Errorf("Unable to find a policy with id: %d", policyID2)
-	}
-	var tm time.Time
-	if p.StartTime.After(tm) {
-		t.Errorf("Unexpected start_time: %v", p.StartTime)
 	}
 }
 
@@ -1108,10 +925,20 @@ func TestAddRepJob(t *testing.T) {
 	}
 }
 
+func TestSetRepJobUUID(t *testing.T) {
+	uuid := "u-rep-job-uuid"
+	assert := assert.New(t)
+	err := SetRepJobUUID(jobID, uuid)
+	assert.Nil(err)
+	j, err := GetRepJob(jobID)
+	assert.Nil(err)
+	assert.Equal(uuid, j.UUID)
+}
+
 func TestUpdateRepJobStatus(t *testing.T) {
 	err := UpdateRepJobStatus(jobID, models.JobFinished)
 	if err != nil {
-		t.Errorf("Error occured in UpdateRepJobStatus, error: %v, id: %d", err, jobID)
+		t.Errorf("Error occurred in UpdateRepJobStatus, error: %v, id: %d", err, jobID)
 		return
 	}
 	j, err := GetRepJob(jobID)
@@ -1126,7 +953,7 @@ func TestUpdateRepJobStatus(t *testing.T) {
 	}
 	err = UpdateRepJobStatus(jobID, models.JobPending)
 	if err != nil {
-		t.Errorf("Error occured in UpdateRepJobStatus when update it back to status pending, error: %v, id: %d", err, jobID)
+		t.Errorf("Error occurred in UpdateRepJobStatus when update it back to status pending, error: %v, id: %d", err, jobID)
 		return
 	}
 }
@@ -1134,7 +961,7 @@ func TestUpdateRepJobStatus(t *testing.T) {
 func TestGetRepPolicyByProject(t *testing.T) {
 	p1, err := GetRepPolicyByProject(99)
 	if err != nil {
-		t.Errorf("Error occured in GetRepPolicyByProject:%v, project ID: %d", err, 99)
+		t.Errorf("Error occurred in GetRepPolicyByProject:%v, project ID: %d", err, 99)
 		return
 	}
 	if len(p1) > 0 {
@@ -1157,57 +984,86 @@ func TestGetRepPolicyByProject(t *testing.T) {
 	}
 }
 
-func TestGetRepJobByPolicy(t *testing.T) {
-	jobs, err := GetRepJobByPolicy(999)
-	if err != nil {
-		t.Errorf("Error occured in GetRepJobByPolicy: %v, policy ID: %d", err, 999)
-		return
-	}
-	if len(jobs) > 0 {
-		t.Errorf("Unexpected length of jobs, expected: 0, in fact: %d", len(jobs))
-		return
-	}
-	jobs, err = GetRepJobByPolicy(policyID)
-	if err != nil {
-		t.Errorf("Error occured in GetRepJobByPolicy: %v, policy ID: %d", err, policyID)
-		return
-	}
-	if len(jobs) != 1 {
-		t.Errorf("Unexpected length of jobs, expected: 1, in fact: %d", len(jobs))
-		return
-	}
-	if jobs[0].ID != jobID {
-		t.Errorf("Unexpected job ID in the result, expected: %d, in fact: %d", jobID, jobs[0].ID)
-		return
-	}
-}
+func TestGetRepJobs(t *testing.T) {
+	var policyID int64 = 10000
+	repository := "repository_for_test_get_rep_jobs"
+	operation := "operation_for_test"
+	status := "status_for_test"
+	now := time.Now().Add(1 * time.Minute)
+	id, err := AddRepJob(models.RepJob{
+		PolicyID:     policyID,
+		Repository:   repository,
+		Operation:    operation,
+		Status:       status,
+		CreationTime: now,
+		UpdateTime:   now,
+	})
+	require.Nil(t, err)
+	defer DeleteRepJob(id)
 
-func TestFilterRepJobs(t *testing.T) {
-	jobs, _, err := FilterRepJobs(policyID, "", "", nil, nil, 1000, 0)
-	if err != nil {
-		t.Errorf("Error occured in FilterRepJobs: %v, policy ID: %d", err, policyID)
-		return
+	// no query
+	jobs, err := GetRepJobs()
+	require.Nil(t, err)
+	found := false
+	for _, job := range jobs {
+		if job.ID == id {
+			found = true
+			break
+		}
 	}
-	if len(jobs) != 1 {
-		t.Errorf("Unexpected length of jobs, expected: 1, in fact: %d", len(jobs))
-		return
-	}
-	if jobs[0].ID != jobID {
-		t.Errorf("Unexpected job ID in the result, expected: %d, in fact: %d", jobID, jobs[0].ID)
-		return
-	}
+	assert.True(t, found)
+
+	// query by policy ID
+	jobs, err = GetRepJobs(&models.RepJobQuery{
+		PolicyID: policyID,
+	})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(jobs))
+	assert.Equal(t, id, jobs[0].ID)
+
+	// query by repository
+	jobs, err = GetRepJobs(&models.RepJobQuery{
+		Repository: repository,
+	})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(jobs))
+	assert.Equal(t, id, jobs[0].ID)
+
+	// query by operation
+	jobs, err = GetRepJobs(&models.RepJobQuery{
+		Operations: []string{operation},
+	})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(jobs))
+	assert.Equal(t, id, jobs[0].ID)
+
+	// query by status
+	jobs, err = GetRepJobs(&models.RepJobQuery{
+		Statuses: []string{status},
+	})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(jobs))
+	assert.Equal(t, id, jobs[0].ID)
+
+	// query by creation time
+	jobs, err = GetRepJobs(&models.RepJobQuery{
+		StartTime: &now,
+	})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(jobs))
+	assert.Equal(t, id, jobs[0].ID)
 }
 
 func TestDeleteRepJob(t *testing.T) {
 	err := DeleteRepJob(jobID)
 	if err != nil {
-		t.Errorf("Error occured in DeleteRepJob: %v, id: %d", err, jobID)
+		t.Errorf("Error occurred in DeleteRepJob: %v, id: %d", err, jobID)
 		return
 	}
 	t.Logf("deleted rep job, id: %d", jobID)
 	j, err := GetRepJob(jobID)
 	if err != nil {
-		t.Errorf("Error occured in GetRepJob:%v", err)
+		t.Errorf("Error occurred in GetRepJob:%v", err)
 		return
 	}
 	if j != nil {
@@ -1216,61 +1072,10 @@ func TestDeleteRepJob(t *testing.T) {
 	}
 }
 
-func TestGetRepoJobToStop(t *testing.T) {
-	jobs := [...]models.RepJob{
-		models.RepJob{
-			Repository: "library/ubuntu",
-			PolicyID:   policyID,
-			Operation:  "transfer",
-			Status:     models.JobRunning,
-		},
-		models.RepJob{
-			Repository: "library/ubuntu",
-			PolicyID:   policyID,
-			Operation:  "transfer",
-			Status:     models.JobFinished,
-		},
-		models.RepJob{
-			Repository: "library/ubuntu",
-			PolicyID:   policyID,
-			Operation:  "transfer",
-			Status:     models.JobCanceled,
-		},
-	}
-	var err error
-	var i int64
-	var ids []int64
-	for _, j := range jobs {
-		i, err = AddRepJob(j)
-		ids = append(ids, i)
-		if err != nil {
-			log.Errorf("Failed to add Job: %+v, error: %v", j, err)
-			return
-		}
-	}
-	res, err := GetRepJobToStop(policyID)
-	if err != nil {
-		log.Errorf("Failed to Get Jobs, error: %v", err)
-		return
-	}
-	//time.Sleep(15 * time.Second)
-	if len(res) != 1 {
-		log.Errorf("Expected length of stoppable jobs, expected:1, in fact: %d", len(res))
-		return
-	}
-	for _, id := range ids {
-		err = DeleteRepJob(id)
-		if err != nil {
-			log.Errorf("Failed to delete job, id: %d, error: %v", id, err)
-			return
-		}
-	}
-}
-
 func TestDeleteRepTarget(t *testing.T) {
 	err := DeleteRepTarget(targetID)
 	if err != nil {
-		t.Errorf("Error occured in DeleteRepTarget: %v, id: %d", err, targetID)
+		t.Errorf("Error occurred in DeleteRepTarget: %v, id: %d", err, targetID)
 		return
 	}
 	t.Logf("deleted target, id: %d", targetID)
@@ -1283,8 +1088,13 @@ func TestDeleteRepTarget(t *testing.T) {
 	}
 }
 
+func TestGetTotalOfRepPolicies(t *testing.T) {
+	_, err := GetTotalOfRepPolicies("", 1)
+	require.Nil(t, err)
+}
+
 func TestFilterRepPolicies(t *testing.T) {
-	_, err := FilterRepPolicies("name", 0)
+	_, err := FilterRepPolicies("name", 0, 0, 0)
 	if err != nil {
 		t.Fatalf("failed to filter policy: %v", err)
 	}
@@ -1303,87 +1113,16 @@ func TestUpdateRepPolicy(t *testing.T) {
 func TestDeleteRepPolicy(t *testing.T) {
 	err := DeleteRepPolicy(policyID)
 	if err != nil {
-		t.Errorf("Error occured in DeleteRepPolicy: %v, id: %d", err, policyID)
+		t.Errorf("Error occurred in DeleteRepPolicy: %v, id: %d", err, policyID)
 		return
 	}
 	t.Logf("delete rep policy, id: %d", policyID)
 	p, err := GetRepPolicy(policyID)
 	if err != nil && err != orm.ErrNoRows {
-		t.Errorf("Error occured in GetRepPolicy:%v", err)
+		t.Errorf("Error occurred in GetRepPolicy:%v", err)
 	}
-	if p != nil && p.Deleted != 1 {
+	if p != nil && !p.Deleted {
 		t.Errorf("Able to find rep policy after deletion, id: %d", policyID)
-	}
-}
-
-func TestResetRepJobs(t *testing.T) {
-
-	job1 := models.RepJob{
-		Repository: "library/ubuntua",
-		PolicyID:   policyID,
-		Operation:  "transfer",
-		Status:     models.JobRunning,
-	}
-	job2 := models.RepJob{
-		Repository: "library/ubuntub",
-		PolicyID:   policyID,
-		Operation:  "transfer",
-		Status:     models.JobCanceled,
-	}
-	id1, err := AddRepJob(job1)
-	if err != nil {
-		t.Errorf("Failed to add job: %+v, error: %v", job1, err)
-		return
-	}
-	id2, err := AddRepJob(job2)
-	if err != nil {
-		t.Errorf("Failed to add job: %+v, error: %v", job2, err)
-		return
-	}
-	err = ResetRunningJobs()
-	if err != nil {
-		t.Errorf("Failed to reset running jobs, error: %v", err)
-	}
-	j1, err := GetRepJob(id1)
-	if err != nil {
-		t.Errorf("Failed to get rep job, id: %d, error: %v", id1, err)
-		return
-	}
-	if j1.Status != models.JobPending {
-		t.Errorf("The rep job: %d, status should be Pending, but infact: %s", id1, j1.Status)
-		return
-	}
-	j2, err := GetRepJob(id2)
-	if err != nil {
-		t.Errorf("Failed to get rep job, id: %d, error: %v", id2, err)
-		return
-	}
-	if j2.Status == models.JobPending {
-		t.Errorf("The rep job: %d, status should be Canceled, but infact: %s", id2, j2.Status)
-		return
-	}
-}
-
-func TestGetJobByStatus(t *testing.T) {
-	r1, err := GetRepJobByStatus(models.JobPending, models.JobRunning)
-	if err != nil {
-		t.Errorf("Failed to run GetRepJobByStatus, error: %v", err)
-	}
-	if len(r1) != 1 {
-		t.Errorf("Unexpected length of result, expected 1, but in fact:%d", len(r1))
-		return
-	}
-
-	r2, err := GetRepJobByStatus(models.JobPending, models.JobCanceled)
-	if err != nil {
-		t.Errorf("Failed to run GetRepJobByStatus, error: %v", err)
-	}
-	if len(r2) != 2 {
-		t.Errorf("Unexpected length of result, expected 2, but in fact:%d", len(r2))
-		return
-	}
-	for _, j := range r2 {
-		DeleteRepJob(j.ID)
 	}
 }
 
@@ -1522,6 +1261,21 @@ func TestGetScanJobs(t *testing.T) {
 	assert.Nil(err)
 }
 
+func TestSetScanJobUUID(t *testing.T) {
+	uuid := "u-scan-job-uuid"
+	assert := assert.New(t)
+	id, err := AddScanJob(sj1)
+	assert.Nil(err)
+	err = SetScanJobUUID(id, uuid)
+	assert.Nil(err)
+	j, err := GetScanJob(id)
+	assert.Nil(err)
+	assert.Equal(uuid, j.UUID)
+	err = ClearTable(models.ScanJobTable)
+	assert.Nil(err)
+
+}
+
 func TestUpdateScanJobStatus(t *testing.T) {
 	assert := assert.New(t)
 	id, err := AddScanJob(sj1)
@@ -1531,8 +1285,6 @@ func TestUpdateScanJobStatus(t *testing.T) {
 	j, err := GetScanJob(id)
 	assert.Nil(err)
 	assert.Equal("newstatus", j.Status)
-	err = UpdateScanJobStatus(id+9, "newstatus")
-	assert.NotNil(err)
 	err = ClearTable(models.ScanJobTable)
 	assert.Nil(err)
 }
@@ -1630,4 +1382,109 @@ func TestGetScanJobsByStatus(t *testing.T) {
 	assert.Nil(err)
 	assert.Equal(1, len(r2))
 	assert.Equal(sj1.Repository, r2[0].Repository)
+}
+
+func TestIsSuperUser(t *testing.T) {
+	assert := assert.New(t)
+	assert.True(IsSuperUser("admin"))
+	assert.False(IsSuperUser("none"))
+}
+
+func TestSaveConfigEntries(t *testing.T) {
+	configEntries := []models.ConfigEntry{
+		{
+			Key:   "teststringkey",
+			Value: "192.168.111.211",
+		},
+		{
+			Key:   "testboolkey",
+			Value: "true",
+		},
+		{
+			Key:   "testnumberkey",
+			Value: "5",
+		},
+		{
+			Key:   common.CfgDriverDB,
+			Value: "db",
+		},
+	}
+	err := SaveConfigEntries(configEntries)
+	if err != nil {
+		t.Fatalf("failed to save configuration to database %v", err)
+	}
+	readEntries, err := GetConfigEntries()
+	if err != nil {
+		t.Fatalf("Failed to get configuration from database %v", err)
+	}
+	findItem := 0
+	for _, entry := range readEntries {
+		switch entry.Key {
+		case "teststringkey":
+			if "192.168.111.211" == entry.Value {
+				findItem++
+			}
+		case "testnumberkey":
+			if "5" == entry.Value {
+				findItem++
+			}
+		case "testboolkey":
+			if "true" == entry.Value {
+				findItem++
+			}
+		default:
+		}
+	}
+	if findItem != 3 {
+		t.Fatalf("Should update 3 configuration but only update %d", findItem)
+	}
+
+	configEntries = []models.ConfigEntry{
+		{
+			Key:   "teststringkey",
+			Value: "192.168.111.215",
+		},
+		{
+			Key:   "testboolkey",
+			Value: "false",
+		},
+		{
+			Key:   "testnumberkey",
+			Value: "7",
+		},
+		{
+			Key:   common.CfgDriverDB,
+			Value: "db",
+		},
+	}
+	err = SaveConfigEntries(configEntries)
+	if err != nil {
+		t.Fatalf("failed to save configuration to database %v", err)
+	}
+	readEntries, err = GetConfigEntries()
+	if err != nil {
+		t.Fatalf("Failed to get configuration from database %v", err)
+	}
+	findItem = 0
+	for _, entry := range readEntries {
+		switch entry.Key {
+		case "teststringkey":
+			if "192.168.111.215" == entry.Value {
+				findItem++
+			}
+		case "testnumberkey":
+			if "7" == entry.Value {
+				findItem++
+			}
+		case "testboolkey":
+			if "false" == entry.Value {
+				findItem++
+			}
+		default:
+		}
+	}
+	if findItem != 3 {
+		t.Fatalf("Should update 3 configuration but only update %d", findItem)
+	}
+
 }

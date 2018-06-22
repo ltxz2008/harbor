@@ -16,15 +16,12 @@ package api
 
 import (
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 
 	"github.com/vmware/harbor/src/common/dao"
 	"github.com/vmware/harbor/src/common/models"
 	"github.com/vmware/harbor/src/common/utils"
-	registry_error "github.com/vmware/harbor/src/common/utils/error"
 	"github.com/vmware/harbor/src/common/utils/log"
 	"github.com/vmware/harbor/src/common/utils/registry"
 	"github.com/vmware/harbor/src/common/utils/registry/auth"
@@ -60,72 +57,71 @@ func (t *TargetAPI) Prepare() {
 
 func (t *TargetAPI) ping(endpoint, username, password string, insecure bool) {
 	registry, err := newRegistryClient(endpoint, insecure, username, password)
+	if err == nil {
+		err = registry.Ping()
+	}
+
 	if err != nil {
-		// timeout, dns resolve error, connection refused, etc.
-		if urlErr, ok := err.(*url.Error); ok {
-			if netErr, ok := urlErr.Err.(net.Error); ok {
-				t.CustomAbort(http.StatusBadRequest, netErr.Error())
-			}
-
-			t.CustomAbort(http.StatusBadRequest, urlErr.Error())
-		}
-
-		log.Errorf("failed to create registry client: %#v", err)
-		t.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
+		log.Errorf("failed to ping target: %v", err)
+		// do not return any detail information of the error, or may cause SSRF security issue #3755
+		t.RenderError(http.StatusBadRequest, "failed to ping target")
+		return
 	}
-
-	if err = registry.Ping(); err != nil {
-		if regErr, ok := err.(*registry_error.HTTPError); ok {
-			t.CustomAbort(regErr.StatusCode, regErr.Detail)
-		}
-
-		log.Errorf("failed to ping registry %s: %v", registry.Endpoint.String(), err)
-		t.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
-	}
-}
-
-// PingByID ping target by ID
-func (t *TargetAPI) PingByID() {
-	id := t.GetIDFromURL()
-
-	target, err := dao.GetRepTarget(id)
-	if err != nil {
-		log.Errorf("failed to get target %d: %v", id, err)
-		t.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
-	}
-	if target == nil {
-		t.CustomAbort(http.StatusNotFound, fmt.Sprintf("target %d not found", id))
-	}
-
-	endpoint := target.URL
-	username := target.Username
-	password := target.Password
-	insecure := target.Insecure
-	if len(password) != 0 {
-		password, err = utils.ReversibleDecrypt(password, t.secretKey)
-		if err != nil {
-			log.Errorf("failed to decrypt password: %v", err)
-			t.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
-		}
-	}
-	t.ping(endpoint, username, password, insecure)
 }
 
 // Ping validates whether the target is reachable and whether the credential is valid
 func (t *TargetAPI) Ping() {
 	req := struct {
-		Endpoint string `json:"endpoint"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Insecure bool   `json:"insecure"`
+		ID       *int64  `json:"id"`
+		Endpoint *string `json:"endpoint"`
+		Username *string `json:"username"`
+		Password *string `json:"password"`
+		Insecure *bool   `json:"insecure"`
 	}{}
 	t.DecodeJSONReq(&req)
 
-	if len(req.Endpoint) == 0 {
-		t.CustomAbort(http.StatusBadRequest, "endpoint is required")
+	target := &models.RepTarget{}
+	if req.ID != nil {
+		var err error
+		target, err = dao.GetRepTarget(*req.ID)
+		if err != nil {
+			t.HandleInternalServerError(fmt.Sprintf("failed to get target %d: %v", *req.ID, err))
+			return
+		}
+		if target == nil {
+			t.HandleNotFound(fmt.Sprintf("target %d not found", *req.ID))
+			return
+		}
+		if len(target.Password) != 0 {
+			target.Password, err = utils.ReversibleDecrypt(target.Password, t.secretKey)
+			if err != nil {
+				t.HandleInternalServerError(fmt.Sprintf("failed to decrypt password: %v", err))
+				return
+			}
+		}
 	}
 
-	t.ping(req.Endpoint, req.Username, req.Password, req.Insecure)
+	if req.Endpoint != nil {
+		url, err := utils.ParseEndpoint(*req.Endpoint)
+		if err != nil {
+			t.HandleBadRequest(err.Error())
+			return
+		}
+
+		// Prevent SSRF security issue #3755
+		target.URL = url.Scheme + "://" + url.Host + url.Path
+	}
+	if req.Username != nil {
+		target.Username = *req.Username
+	}
+	if req.Password != nil {
+		target.Password = *req.Password
+	}
+	if req.Insecure != nil {
+		target.Insecure = *req.Insecure
+	}
+
+	t.ping(target.URL, target.Username, target.Password, target.Insecure)
 }
 
 // Get ...
@@ -139,7 +135,8 @@ func (t *TargetAPI) Get() {
 	}
 
 	if target == nil {
-		t.CustomAbort(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+		t.HandleNotFound(fmt.Sprintf("target %d not found", id))
+		return
 	}
 
 	target.Password = ""
@@ -178,7 +175,8 @@ func (t *TargetAPI) Post() {
 	}
 
 	if ta != nil {
-		t.CustomAbort(http.StatusConflict, "name is already used")
+		t.HandleConflict("name is already used")
+		return
 	}
 
 	ta, err = dao.GetRepTargetByEndpoint(target.URL)
@@ -188,7 +186,8 @@ func (t *TargetAPI) Post() {
 	}
 
 	if ta != nil {
-		t.CustomAbort(http.StatusConflict, fmt.Sprintf("the target whose endpoint is %s already exists", target.URL))
+		t.HandleConflict(fmt.Sprintf("the target whose endpoint is %s already exists", target.URL))
+		return
 	}
 
 	if len(target.Password) != 0 {
@@ -219,26 +218,10 @@ func (t *TargetAPI) Put() {
 	}
 
 	if target == nil {
-		t.CustomAbort(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+		t.HandleNotFound(fmt.Sprintf("target %d not found", id))
+		return
 	}
 
-	policies, err := dao.GetRepPolicyByTarget(id)
-	if err != nil {
-		log.Errorf("failed to get policies according target %d: %v", id, err)
-		t.CustomAbort(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
-	}
-
-	hasEnabledPolicy := false
-	for _, policy := range policies {
-		if policy.Enabled == 1 {
-			hasEnabledPolicy = true
-			break
-		}
-	}
-
-	if hasEnabledPolicy {
-		t.CustomAbort(http.StatusBadRequest, "the target is associated with policy which is enabled")
-	}
 	if len(target.Password) != 0 {
 		target.Password, err = utils.ReversibleDecrypt(target.Password, t.secretKey)
 		if err != nil {
@@ -285,7 +268,8 @@ func (t *TargetAPI) Put() {
 		}
 
 		if ta != nil {
-			t.CustomAbort(http.StatusConflict, "name is already used")
+			t.HandleConflict("name is already used")
+			return
 		}
 	}
 
@@ -297,7 +281,8 @@ func (t *TargetAPI) Put() {
 		}
 
 		if ta != nil {
-			t.CustomAbort(http.StatusConflict, fmt.Sprintf("the target whose endpoint is %s already exists", target.URL))
+			t.HandleConflict(fmt.Sprintf("the target whose endpoint is %s already exists", target.URL))
+			return
 		}
 	}
 
@@ -326,7 +311,8 @@ func (t *TargetAPI) Delete() {
 	}
 
 	if target == nil {
-		t.CustomAbort(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+		t.HandleNotFound(fmt.Sprintf("target %d not found", id))
+		return
 	}
 
 	policies, err := dao.GetRepPolicyByTarget(id)
@@ -336,6 +322,7 @@ func (t *TargetAPI) Delete() {
 	}
 
 	if len(policies) > 0 {
+		log.Error("the target is used by policies, can not be deleted")
 		t.CustomAbort(http.StatusPreconditionFailed, "the target is used by policies, can not be deleted")
 	}
 
@@ -367,7 +354,8 @@ func (t *TargetAPI) ListPolicies() {
 	}
 
 	if target == nil {
-		t.CustomAbort(http.StatusNotFound, http.StatusText(http.StatusNotFound))
+		t.HandleNotFound(fmt.Sprintf("target %d not found", id))
+		return
 	}
 
 	policies, err := dao.GetRepPolicyByTarget(id)

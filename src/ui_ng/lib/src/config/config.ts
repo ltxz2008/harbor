@@ -65,6 +65,10 @@ export class Configuration {
     ldap_uid: StringValueItem;
     ldap_url: StringValueItem;
     ldap_verify_cert: BoolValueItem;
+    uaa_client_id: StringValueItem;
+    uaa_client_secret?: StringValueItem;
+    uaa_endpoint: StringValueItem;
+    uaa_verify_cert: BoolValueItem;
     email_host: StringValueItem;
     email_identity: StringValueItem;
     email_from: StringValueItem;
@@ -77,6 +81,7 @@ export class Configuration {
     token_expiration: NumberValueItem;
     cfg_expiration: NumberValueItem;
     scan_all_policy: ComplexValueItem;
+    read_only: BoolValueItem;
 
     public constructor() {
         this.auth_mode = new StringValueItem("db_auth", true);
@@ -91,6 +96,10 @@ export class Configuration {
         this.ldap_uid = new StringValueItem("", true);
         this.ldap_url = new StringValueItem("", true);
         this.ldap_verify_cert = new BoolValueItem(true, true);
+        this.uaa_client_id = new StringValueItem("", true);
+        this.uaa_client_secret = new StringValueItem("", true);
+        this.uaa_endpoint = new StringValueItem("", true);
+        this.uaa_verify_cert = new BoolValueItem(false, true);
         this.email_host = new StringValueItem("", true);
         this.email_identity = new StringValueItem("", true);
         this.email_from = new StringValueItem("", true);
@@ -108,5 +117,6 @@ export class Configuration {
                 daily_time: 0
             }
         }, true);
+        this.read_only = new BoolValueItem(false, true);
     }
 }

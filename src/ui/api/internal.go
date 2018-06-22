@@ -16,6 +16,11 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/vmware/harbor/src/common"
+	"github.com/vmware/harbor/src/common/dao"
+	"github.com/vmware/harbor/src/common/models"
+	"github.com/vmware/harbor/src/common/utils/log"
 )
 
 // InternalAPI handles request of harbor admin...
@@ -40,6 +45,25 @@ func (ia *InternalAPI) Prepare() {
 func (ia *InternalAPI) SyncRegistry() {
 	err := SyncRegistry(ia.ProjectMgr)
 	if err != nil {
-		ia.CustomAbort(http.StatusInternalServerError, "internal error")
+		ia.HandleInternalServerError(err.Error())
+		return
 	}
+}
+
+// RenameAdmin we don't provide flexibility in this API, as this is a workaround.
+func (ia *InternalAPI) RenameAdmin() {
+	if !dao.IsSuperUser(ia.SecurityCtx.GetUsername()) {
+		log.Errorf("User %s is not super user, not allow to rename admin.", ia.SecurityCtx.GetUsername())
+		ia.CustomAbort(http.StatusForbidden, "")
+	}
+	newName := common.NewHarborAdminName
+	if err := dao.ChangeUserProfile(models.User{
+		UserID:   1,
+		Username: newName,
+	}, "username"); err != nil {
+		log.Errorf("Failed to change admin's username, error: %v", err)
+		ia.CustomAbort(http.StatusInternalServerError, "Failed to rename admin user.")
+	}
+	log.Debugf("The super user has been renamed to: %s", newName)
+	ia.DestroySession()
 }
